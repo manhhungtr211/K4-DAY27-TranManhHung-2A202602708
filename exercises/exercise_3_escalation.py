@@ -7,7 +7,12 @@ clarifying questions and then synthesizes a refined review from the answers.
 from __future__ import annotations
 
 import argparse
+import sys
 import uuid
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
@@ -26,7 +31,7 @@ from common.schemas import (
 )
 
 
-console = Console()
+console = Console(legacy_windows=False)
 
 
 def node_fetch_pr(state):
@@ -42,11 +47,18 @@ def node_analyze(state):
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         analysis = llm.invoke([
-            {"role": "system", "content": (
-                "Senior reviewer. Structured output. "
-                # TODO: add an instruction: if confidence < 60%, populate escalation_questions
-                # with 2–4 specific, context-rich questions (reference which file/section in the diff).
-            )},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code reviewer providing a structured PR review.\n"
+                    "Calibrate your confidence score (0.0 to 1.0) carefully based on risk:\n"
+                    "- High confidence (>= 0.73): Trivial, simple, safe changes (typos, minor docs, straightforward logic).\n"
+                    "- Medium confidence (0.58 to 0.72): Medium-risk changes, small feature additions, schema changes, or open design questions needing human check.\n"
+                    "- Low confidence (< 0.58): High-risk changes touching security, authentication, hashing/passwords (e.g. MD5), plaintext tokens, SQL injection, or unvalidated cloud sync. Such PRs must have confidence < 0.55.\n\n"
+                    "IMPORTANT: If confidence < 0.58, populate escalation_questions with 2–4 specific, context-rich questions "
+                    "referencing specific files, functions, or sections in the diff to clarify reviewer intent and security risks."
+                ),
+            },
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
     console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.escalation_questions)} question(s)")
@@ -71,22 +83,49 @@ def node_escalate(state: ReviewState) -> dict:
         # fallback when the LLM didn't generate any questions
         questions = ["What is the intent of this PR?", "Any migration concerns?"]
 
-    # TODO: call interrupt(payload) where payload kind="escalation" contains:
-    #       pr_url, confidence, confidence_reasoning, summary, risk_factors, questions.
-    # answers = interrupt({...})
-    # return {"escalation_answers": answers}
-    raise NotImplementedError("Call interrupt() with an escalation payload")
+    answers = interrupt({
+        "kind": "escalation",
+        "pr_url": state["pr_url"],
+        "confidence": a.confidence,
+        "confidence_reasoning": a.confidence_reasoning,
+        "summary": a.summary,
+        "risk_factors": a.risk_factors,
+        "questions": questions,
+    })
+    return {"escalation_answers": answers}
 
 
 def node_synthesize(state: ReviewState) -> dict:
     """Re-prompt LLM with the reviewer's answers and produce a refined review."""
-    # TODO:
-    #   - read state["escalation_answers"] (dict[question, answer])
-    #   - call get_llm().with_structured_output(PRAnalysis).invoke(...) with a prompt
-    #     containing the original diff + initial analysis + Q&A.
-    #   - return {"analysis": refined}
-    # `node_commit` will then post the refined review to the PR.
-    raise NotImplementedError("Synthesize a refined PRAnalysis using the reviewer answers")
+    console.print("[cyan]→ synthesize[/cyan]")
+    answers = state.get("escalation_answers", {})
+    qa_text = "\n".join([f"Q: {q}\nA: {ans}" for q, ans in answers.items()])
+    llm = get_llm().with_structured_output(PRAnalysis)
+    with console.status("[dim]LLM synthesizing refined review...[/dim]"):
+        refined = llm.invoke([
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code reviewer. You previously analyzed a pull request with low confidence "
+                    "and escalated with questions to the human reviewer.\n"
+                    "Now the reviewer has answered your questions. Produce an updated, refined PRAnalysis structured review.\n"
+                    "Incorporate their answers into your review summary and comments. "
+                    "With these answers clarified, your confidence should be significantly higher (>= 0.73) "
+                    "as the uncertainties have been resolved."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Title: {state['pr_title']}\n\n"
+                    f"Diff:\n{state['pr_diff']}\n\n"
+                    f"Initial Summary: {state['analysis'].summary}\n\n"
+                    f"Reviewer Answers:\n{qa_text}"
+                ),
+            },
+        ])
+    console.print(f"  [green]✓[/green] refined confidence={refined.confidence:.0%}, {len(refined.comments)} comment(s)")
+    return {"analysis": refined}
 
 
 def node_human_approval(state):
@@ -160,8 +199,9 @@ def build_graph():
     )
     g.add_edge("auto_approve", END)
     g.add_edge("human_approval", "commit")
+    g.add_edge("escalate", "synthesize")
+    g.add_edge("synthesize", "commit")
     g.add_edge("commit", END)
-    # TODO: wire escalate → synthesize → commit  (commit already → END)
     return g.compile(checkpointer=MemorySaver())
 
 
