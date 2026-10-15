@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from rich.console import Console
 from rich.table import Table
@@ -24,7 +29,7 @@ RISK_COLOR = {"low": "green", "med": "yellow", "high": "red"}
 
 
 async def list_threads() -> None:
-    console = Console()
+    console = Console(legacy_windows=False)
     async with db_conn() as conn:
         async with conn.execute(
             """
@@ -58,7 +63,7 @@ async def list_threads() -> None:
 
 
 async def replay(thread_id: str) -> None:
-    console = Console()
+    console = Console(legacy_windows=False)
     events = await replay_events(thread_id)
 
     if not events:
