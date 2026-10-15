@@ -55,7 +55,7 @@ def node_analyze(state: ReviewState) -> dict:
                     "Calibrate your confidence score (0.0 to 1.0) carefully based on risk:\n"
                     "- High confidence (>= 0.73): Trivial, simple, safe changes (typos, minor docs, straightforward logic).\n"
                     "- Medium confidence (0.58 to 0.72): Medium-risk changes, small feature additions, schema changes, or open design questions needing human check.\n"
-                    "- Low confidence (< 0.58): High-risk changes touching security, auth, crypto/hashing, data migrations, or dangerous SQL/storage patterns that need escalation."
+                    "- Low confidence (< 0.58): High-risk changes touching security, authentication, hashing/passwords (e.g. MD5), plaintext tokens, SQL injection, or unvalidated cloud sync. Such PRs must have confidence < 0.55."
                 ),
             },
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
